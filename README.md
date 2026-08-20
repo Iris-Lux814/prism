@@ -52,7 +52,7 @@ cp .env.example .env
 ```
 
 ```js
-const { LocalMemoryService } = require("imprint-memory");
+const { LocalMemoryService } = require("./src/local-memory-service");
 
 const memory = new LocalMemoryService({
   vaultPath: "./memory-vault",   // 不存在会自动创建
