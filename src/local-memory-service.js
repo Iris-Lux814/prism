@@ -1,4 +1,4 @@
-﻿// imprint-memory — LocalMemoryService
+﻿// Prism — LocalMemoryService
 // Source-first, append-only local memory vault for AI companions.
 //
 // Default actor names ("晶晶" / "沐沐") appear in the legacy-audit and governance

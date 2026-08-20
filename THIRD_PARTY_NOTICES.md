@@ -3,7 +3,7 @@
 ## better-sqlite3 (optional dependency)
 
 Used for FTS5 full-text search acceleration. The library is optional — if not
-installed, imprint-memory falls back to bigram search automatically.
+installed, Prism falls back to bigram search automatically.
 
 - License: MIT
 - Repository: https://github.com/WiseLibs/better-sqlite3

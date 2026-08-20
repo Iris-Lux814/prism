@@ -40,9 +40,15 @@ memory-vault/
 ## 快速开始
 
 ```bash
-npm install imprint-memory
-# 可选，安装后启用 FTS5 加速：
-npm install better-sqlite3
+# 1. 克隆仓库
+git clone https://github.com/Iris-Lux814/prism.git
+cd prism
+
+# 2. 安装依赖（better-sqlite3 为可选，安装后启用 FTS5 加速）
+npm install
+
+# 3. 复制环境变量模板，填入你的路径和密钥
+cp .env.example .env
 ```
 
 ```js

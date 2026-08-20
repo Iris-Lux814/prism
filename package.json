@@ -1,5 +1,5 @@
 {
-  "name": "imprint-memory",
+  "name": "prism",
   "version": "0.2.0",
   "description": "Source-first, append-only local memory vault for AI companions. Supports FTS5 search, lifecycle management, and zero-token maintenance.",
   "main": "src/local-memory-service.js",
