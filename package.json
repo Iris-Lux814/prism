@@ -1,0 +1,24 @@
+{
+  "name": "imprint-memory",
+  "version": "0.2.0",
+  "description": "Source-first, append-only local memory vault for AI companions. Supports FTS5 search, lifecycle management, and zero-token maintenance.",
+  "main": "src/local-memory-service.js",
+  "scripts": {
+    "build-index": "node src/build-fts5-index.js",
+    "maintenance": "node src/lifecycle-maintenance.js"
+  },
+  "keywords": [
+    "ai-memory",
+    "local-memory",
+    "fts5",
+    "lifecycle",
+    "companion-ai"
+  ],
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^9.0.0"
+  }
+}
