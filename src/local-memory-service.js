@@ -326,8 +326,9 @@ class LocalMemoryService {
     const systemPrompt = [
       "你是对话记忆压缩器。根据给定的对话片段，提取并压缩关键状态。",
       "你必须仅输出一个 JSON 对象，不要有任何 markdown、代码块或解释文字。",
+      "memory_atoms 规则：最多5条。必须优先继承上一轮 prev_atoms 中涉及"日期、已发生的重大事件、约定、关系节点"的条目（即使本轮没有提到），再补充本轮新事实。",
       "要求字段（均为中文内容）：",
-      '{"thread_spine":"<=90字，当前关系/状态的最简描述","episode_delta":"<=70字，这次对话最重要的变化","memory_atoms":["<=45字，最多3条，仅明确的事实或有标注的解释"],"open_loops":["<=35字，最多2条，未完成的事项"],"friction_markers":["<=60字，最多3条，不确定/有争议/模糊的时刻，无则省略"],"compression_note":"必填，1-3句中文：保留了什么，没注入什么，为什么","episodes":[{"summary":"<=60字，这个对话段的核心事件","source_ids":["episode id列表"],"role_balance":"user_led|assistant_led|balanced"}],"facts":[{"content":"<=50字，可复用的具体事实","source_ids":["episode id列表"],"confidence":"high|medium|low"}],"perspectives":[{"content":"<=50字，某一方对某事的观点或感受","holder":"user|assistant","source_ids":["episode id列表"]}]}',
+      '{"thread_spine":"<=90字，当前关系/状态的最简描述","episode_delta":"<=70字，这次对话最重要的变化","memory_atoms":["<=55字，最多5条；日期/事件类事实必须继承，见上方规则"],"open_loops":["<=35字，最多2条，未完成的事项"],"friction_markers":["<=60字，最多3条，不确定/有争议/模糊的时刻，无则省略"],"compression_note":"必填，1-3句中文：保留了什么，没注入什么，为什么","episodes":[{"summary":"<=60字，这个对话段的核心事件","source_ids":["episode id列表"],"role_balance":"user_led|assistant_led|balanced"}],"facts":[{"content":"<=50字，可复用的具体事实","source_ids":["episode id列表"],"confidence":"high|medium|low"}],"perspectives":[{"content":"<=50字，某一方对某事的观点或感受","holder":"user|assistant","source_ids":["episode id列表"]}]}',
     ].join("\n");
 
     const userPrompt = [
@@ -336,7 +337,10 @@ class LocalMemoryService {
       JSON.stringify(episodes, null, 2),
       "",
       state.thread_spine ? `上一次压缩的状态摘要：${state.thread_spine}` : "无历史压缩摘要。",
-    ].join("\n");
+      (state.memory_atoms && state.memory_atoms.length > 0)
+        ? `prev_atoms（上一轮保留的关键事实，包含日期/事件类的必须继承）：${state.memory_atoms.filter(Boolean).join("；")}`
+        : "",
+    ].filter(Boolean).join("\n");
 
     const receiptBase = {
       at: nowIso(),
@@ -459,9 +463,9 @@ class LocalMemoryService {
       lines.push("Now: （暂无压缩记录，这是第一次或刚恢复的对话）");
     }
     if (state.episode_delta) lines.push(`Change: ${limit(state.episode_delta, 55)}`);
-    const atoms = textList(state.memory_atoms, "• ", 40, 1);
+    const atoms = textList(state.memory_atoms, "• ", 60, 4);
     if (atoms.length) lines.push(...atoms);
-    const loops = textList(state.open_loops, "◦ ", 30, 1);
+    const loops = textList(state.open_loops, "◦ ", 40, 2);
     if (loops.length) lines.push(...loops);
     const friction = (state.friction_markers || []).filter(Boolean);
     if (friction.length) lines.push(`! ${limit(friction[friction.length - 1], 35)}`);
