@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * 从 source JSONL + derived JSON 全量重建 FTS5 检索索引。
  * 可单独运行，也在索引损坏时由 memory-service 自动调用。
@@ -120,13 +120,13 @@ function build() {
   const tierMap = readDerivedTiers();
   console.log(`[fts5-build] ${tierMap.size} tier mappings found`);
 
-  // 删旧库
-  if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
   fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
   const db = new Database(DB_PATH);
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
+  // Rebuild only keyword data; preserve semantic vectors stored in the same DB.
+  db.exec("DROP TABLE IF EXISTS source_fts; DELETE FROM episode_tier;");
   setupDb(db);
 
   const insertFts = db.prepare("INSERT INTO source_fts(thread_id, seq, role, content) VALUES (?, ?, ?, ?)");

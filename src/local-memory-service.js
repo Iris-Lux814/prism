@@ -1,4 +1,4 @@
-﻿// Prism — LocalMemoryService
+// Prism — LocalMemoryService
 // Source-first, append-only local memory vault for AI companions.
 //
 // Default actor names ("晶晶" / "沐沐") appear in the legacy-audit and governance
@@ -12,6 +12,7 @@
 // `source/` is append-only evidence; `derived/` is safe to rebuild.
 
 const crypto = require("crypto");
+const { spawnSync } = require("child_process");
 const fs = require("fs");
 const https = require("https");
 const path = require("path");
@@ -49,10 +50,13 @@ function buildFts5Query(raw) {
 
 // ─── DeepSeek ─────────────────────────────────────────────────────────────────
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "sk-e145ed86405a49849be5e780925b2037";
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 
 async function callDeepSeek(messages, { max_tokens = 900 } = {}) {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error("DEEPSEEK_API_KEY is required to run the memory compiler");
+  }
   const body = JSON.stringify({ model: DEEPSEEK_MODEL, messages, max_tokens });
   const raw = await new Promise((resolve, reject) => {
     const chunks = [];
@@ -73,6 +77,7 @@ async function callDeepSeek(messages, { max_tokens = 900 } = {}) {
       });
     });
     req.on("error", reject);
+    req.setTimeout(60000, () => req.destroy(new Error("DeepSeek request timed out after 60s")));
     req.write(body);
     req.end();
   });
@@ -90,6 +95,37 @@ function safePart(value) {
 }
 
 function nowIso() { return new Date().toISOString(); }
+
+const OLLAMA_URL = (process.env.OLLAMA_HOST || "http://127.0.0.1:11434").replace(/\/$/, "");
+const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
+const OLLAMA_EMBED_TIMEOUT_MS = Math.max(500, Number(process.env.OLLAMA_EMBED_TIMEOUT_MS) || 5000);
+
+function embedWithOllamaSync(text) {
+  const input = String(text || "").trim();
+  if (!input) return null;
+  const curl = process.platform === "win32" ? "curl.exe" : "curl";
+  const response = spawnSync(curl, [
+    "--silent", "--show-error", "--fail",
+    "--max-time", String(Math.ceil(OLLAMA_EMBED_TIMEOUT_MS / 1000)),
+    "-H", "Content-Type: application/json", "--data-binary", "@-",
+    `${OLLAMA_URL}/api/embed`,
+  ], {
+    input: JSON.stringify({ model: OLLAMA_EMBED_MODEL, input }),
+    encoding: "utf8", windowsHide: true,
+    timeout: OLLAMA_EMBED_TIMEOUT_MS + 1000, maxBuffer: 16 * 1024 * 1024,
+  });
+  if (response.status !== 0) throw new Error(String(response.stderr || `curl exit ${response.status}`).trim());
+  const payload = JSON.parse(response.stdout);
+  const vector = payload.embeddings?.[0] || payload.embedding;
+  if (!Array.isArray(vector) || vector.length === 0) throw new Error("Ollama returned no embedding");
+  return Float32Array.from(vector);
+}
+
+function vectorNorm(vector) {
+  let sum = 0;
+  for (const value of vector) sum += value * value;
+  return Math.sqrt(sum);
+}
 
 function limit(text, max) {
   const value = String(text || "").trim().replace(/\s+/g, " ");
@@ -273,8 +309,11 @@ class LocalMemoryService {
     state.last_episode_id = id;
     state.updated_at = nowIso();
     this.saveState(threadId, state);
-    // FTS5 incremental index (best-effort; failure falls back to bigram)
+    // Search indexes are best-effort and never block the append-only source write.
     try { this._fts5IndexEpisode(episode); } catch {}
+    try { this._embeddingIndexEpisode(episode); } catch (e) {
+      this.logger && this.logger.log(`[embedding] incremental index skipped: ${e.message}`);
+    }
     return episode;
   }
 
@@ -326,7 +365,7 @@ class LocalMemoryService {
     const systemPrompt = [
       "你是对话记忆压缩器。根据给定的对话片段，提取并压缩关键状态。",
       "你必须仅输出一个 JSON 对象，不要有任何 markdown、代码块或解释文字。",
-      "memory_atoms 规则：最多5条。必须优先继承上一轮 prev_atoms 中涉及"日期、已发生的重大事件、约定、关系节点"的条目（即使本轮没有提到），再补充本轮新事实。",
+      "memory_atoms 规则：最多5条。必须优先继承上一轮 prev_atoms 中涉及【日期、已发生的重大事件、约定、关系节点】的条目（即使本轮没有提到），再补充本轮新事实。",
       "要求字段（均为中文内容）：",
       '{"thread_spine":"<=90字，当前关系/状态的最简描述","episode_delta":"<=70字，这次对话最重要的变化","memory_atoms":["<=55字，最多5条；日期/事件类事实必须继承，见上方规则"],"open_loops":["<=35字，最多2条，未完成的事项"],"friction_markers":["<=60字，最多3条，不确定/有争议/模糊的时刻，无则省略"],"compression_note":"必填，1-3句中文：保留了什么，没注入什么，为什么","episodes":[{"summary":"<=60字，这个对话段的核心事件","source_ids":["episode id列表"],"role_balance":"user_led|assistant_led|balanced"}],"facts":[{"content":"<=50字，可复用的具体事实","source_ids":["episode id列表"],"confidence":"high|medium|low"}],"perspectives":[{"content":"<=50字，某一方对某事的观点或感受","holder":"user|assistant","source_ids":["episode id列表"]}]}',
     ].join("\n");
@@ -699,7 +738,55 @@ class LocalMemoryService {
         PRIMARY KEY (thread_id, seq)
       );
       CREATE INDEX IF NOT EXISTS idx_episode_tier_tier ON episode_tier(thread_id, tier);
+      CREATE TABLE IF NOT EXISTS embeddings (
+        thread_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL, model TEXT NOT NULL, dimensions INTEGER NOT NULL,
+        vector BLOB NOT NULL, norm REAL NOT NULL, content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL, PRIMARY KEY (thread_id, seq)
+      );
+      CREATE INDEX IF NOT EXISTS idx_embeddings_thread_seq ON embeddings(thread_id, seq);
     `);
+  }
+
+  _embeddingIndexEpisode(ep) {
+    if (!BetterSqlite3) return;
+    const content = String(ep.content || "").trim();
+    if (!content || ep.deleted) return;
+    const vector = embedWithOllamaSync(content);
+    const norm = vectorNorm(vector);
+    if (!norm) throw new Error("Ollama returned a zero vector");
+    const db = this._fts5Db();
+    this._fts5EnsureSchema(db);
+    db.prepare(`
+      INSERT INTO embeddings(thread_id, seq, role, content, model, dimensions, vector, norm, content_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(thread_id, seq) DO UPDATE SET role=excluded.role, content=excluded.content,
+        model=excluded.model, dimensions=excluded.dimensions, vector=excluded.vector,
+        norm=excluded.norm, content_hash=excluded.content_hash, created_at=excluded.created_at
+    `).run(String(ep.thread_id), Number(ep.sequence), ep.role || "", content,
+      OLLAMA_EMBED_MODEL, vector.length, Buffer.from(vector.buffer), norm,
+      crypto.createHash("sha256").update(content).digest("hex"), nowIso());
+  }
+
+  _searchWithEmbeddings(threadId, query, cutSeq, maxResults) {
+    const queryVector = embedWithOllamaSync(query);
+    const queryNorm = vectorNorm(queryVector);
+    if (!queryNorm) return [];
+    const db = this._fts5Db();
+    this._fts5EnsureSchema(db);
+    const rows = db.prepare(`
+      SELECT e.seq, e.content, e.role, e.dimensions, e.vector, e.norm, et.tier
+      FROM embeddings e JOIN episode_tier et
+        ON et.thread_id = e.thread_id AND et.seq = e.seq
+      WHERE e.thread_id = ? AND e.seq <= ? AND et.tier IN ('hot', 'warm', 'cold')
+    `).all(String(threadId), cutSeq);
+    return rows.filter(row => row.dimensions === queryVector.length && row.norm > 0).map(row => {
+      const stored = new Float32Array(row.vector.buffer, row.vector.byteOffset, row.dimensions);
+      let dot = 0;
+      for (let i = 0; i < queryVector.length; i++) dot += queryVector[i] * stored[i];
+      return { ...row, similarity: dot / (queryNorm * row.norm) };
+    }).sort((a, b) => b.similarity - a.similarity ||
+      fts5TierRank(b.tier) - fts5TierRank(a.tier) || b.seq - a.seq).slice(0, maxResults);
   }
 
   _fts5IndexEpisode(ep) {
@@ -766,7 +853,7 @@ class LocalMemoryService {
     return results; // [{ seq, content, role }]
   }
 
-  // ─── searchEpisodes: FTS5 优先，失败时回退 bigram ──────────────────────────
+  // ─── searchEpisodes: embedding 优先，失败时回退 FTS5 / bigram ─────────────
 
   searchEpisodes(threadId, query, maxResults = 2, { beforeSeq = null } = {}) {
     const timeline = this.getTimeline(threadId, 500);
@@ -774,6 +861,22 @@ class LocalMemoryService {
     // cutSeq for bigram fallback (timeline-window)
     const corpusCutSeq = beforeSeq !== null ? beforeSeq : Math.max(0, lastSeq - 20);
     const corpus = timeline.filter(ep => !ep.deleted && ep.content && ep.sequence <= corpusCutSeq);
+
+    if (BetterSqlite3 && String(query || "").trim()) {
+      try {
+        const state = this.getState(threadId);
+        const cutSeq = beforeSeq !== null ? beforeSeq : Math.max(0, (state.episode_counter || lastSeq) - 20);
+        const rows = this._searchWithEmbeddings(threadId, query, cutSeq, maxResults);
+        if (rows.length > 0) {
+          const timelineBySeq = new Map(timeline.map(ep => [ep.sequence, ep]));
+          return rows.map(row => timelineBySeq.get(row.seq) || {
+            sequence: row.seq, content: row.content, role: row.role, id: null,
+          });
+        }
+      } catch (e) {
+        this.logger && this.logger.log(`[embedding] search unavailable, falling back to FTS5: ${e.message}`);
+      }
+    }
 
     // ── FTS5 path ──────────────────────────────────────────────────────────────
     if (!this._fts5Disabled && BetterSqlite3) {
@@ -1145,16 +1248,11 @@ class LocalMemoryService {
     if (!st || !st.delete_ready) throw new Error("尚未双签确认，不可执行");
     if (st.deleted) throw new Error("已删除");
 
-    try {
-      const { execSync } = require("child_process");
-      execSync(`node "${path.join(__dirname, "backup.js")}"`, { timeout: 15000 });
-    } catch (e) {
-      console.warn("[memory] pre-delete backup failed:", e.message);
-    }
-
     const found = this.findEpisode(episodeId, threadId);
     let contentHash = null;
     if (found) {
+      const backupFile = `${found.file}.${Date.now()}.pre-delete.bak`;
+      fs.copyFileSync(found.file, backupFile);
       contentHash = crypto.createHash("sha256").update(String(found.episode.content || "")).digest("hex");
       const fileContent = fs.readFileSync(found.file, "utf8");
       const newLines = fileContent.split("\n").map(line => {
@@ -1168,6 +1266,16 @@ class LocalMemoryService {
         return line;
       });
       fs.writeFileSync(found.file, newLines.join("\n"), "utf8");
+      if (BetterSqlite3 && !this._fts5Disabled) {
+        try {
+          const db = this._fts5Db();
+          db.prepare("DELETE FROM source_fts WHERE thread_id = ? AND seq = ?").run(String(threadId), found.episode.sequence);
+          db.prepare("DELETE FROM embeddings WHERE thread_id = ? AND seq = ?").run(String(threadId), found.episode.sequence);
+          db.prepare("DELETE FROM episode_tier WHERE thread_id = ? AND seq = ?").run(String(threadId), found.episode.sequence);
+        } catch (e) {
+          this.logger && this.logger.log(`[memory] deleted episode index cleanup failed: ${e.message}`);
+        }
+      }
     }
 
     const tombstone = {

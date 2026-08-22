@@ -23,12 +23,12 @@ Prism 不是把整段聊天塞回模型上下文的"聊天记录总结器"。它
 memory-vault/
 ├── source/
 │   └── conversations/
-│       └── thread-{id}-seq-{n}.jsonl   # 追加写入、永不修改的原始消息
+│       └── {year}/{month}/thread-{id}.jsonl # 追加写入的原始消息
 ├── derived/
 │   ├── episodes/
 │   │   └── thread-{id}-seq-{n}.json    # 编译摘要 + 生命周期元数据
 │   ├── facts/                          # （可选）长期 Fact 卡片
-│   └── lifecycle.db                    # SQLite FTS5 索引（可随时重建）
+│   └── lifecycle.db                    # SQLite FTS5 + embedding 索引
 └── ledger/
     ├── lifecycle-audit.jsonl            # 所有生命周期操作的追加审计日志
     ├── lifecycle-proposals.json         # 待双签确认的提议队列
@@ -44,7 +44,7 @@ memory-vault/
 git clone https://github.com/Iris-Lux814/prism.git
 cd prism
 
-# 2. 安装依赖（better-sqlite3 为可选，安装后启用 FTS5 加速）
+# 2. 安装依赖（需要 Node.js 22+）
 npm install
 
 # 3. 复制环境变量模板，填入你的路径和密钥
@@ -67,7 +67,7 @@ const ep = memory.appendEpisode({
   timestamp: new Date().toISOString(),
 });
 
-// 搜索（FTS5 优先，未安装时自动回退到 bigram）
+// 搜索（Ollama embedding 优先，不可用时回退 FTS5，再回退 bigram）
 const results = memory.searchEpisodes("room-1", "上次聊", 3);
 
 // 生成连续包注入到下一轮 prompt
@@ -109,6 +109,22 @@ const packet = memory.buildContinuityPacket("room-1", 280, {
 召回顺序固定为：**Hot → Warm → Cold**。Archive 在代码层面排除，永不进入结果。
 
 索引缺失或损坏时自动在进程内重建（无子进程）。重建失败则透明回退到 bigram 搜索。
+
+## Embedding 语义搜索
+
+安装并启动 [Ollama](https://ollama.com/)，然后拉取本地免费模型：
+
+```bash
+ollama pull nomic-embed-text
+npm run build-embeddings
+```
+
+迁移脚本会为已有 source 原文生成向量并写入 `lifecycle.db` 的 `embeddings` 表；
+重复运行时会通过内容哈希跳过未变化记录。新消息会同步生成 embedding。
+`searchEpisodes()` 的外部接口保持不变，Ollama 未启动、模型缺失或请求超时时自动回退 FTS5。
+
+可通过 `OLLAMA_HOST`、`OLLAMA_EMBED_MODEL` 和
+`OLLAMA_EMBED_TIMEOUT_MS` 调整服务地址、模型和超时。
 
 ---
 
