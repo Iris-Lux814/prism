@@ -32,16 +32,17 @@ function readEpisodes() {
   return result;
 }
 
-async function embed(input) {
+async function embedMany(input) {
   const response = await fetch(`${OLLAMA_URL}/api/embed`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: MODEL, input }),
   });
   if (!response.ok) throw new Error(`Ollama HTTP ${response.status}: ${await response.text()}`);
   const body = await response.json();
-  const vector = body.embeddings?.[0] || body.embedding;
-  if (!Array.isArray(vector) || !vector.length) throw new Error("Ollama returned no embedding");
-  return Float32Array.from(vector);
+  const vectors = body.embeddings || (body.embedding ? [body.embedding] : []);
+  if (!Array.isArray(vectors) || vectors.length !== input.length)
+    throw new Error(`Ollama returned ${vectors.length} embeddings for ${input.length} inputs`);
+  return vectors.map(vector => Float32Array.from(vector));
 }
 
 async function main() {
@@ -66,19 +67,29 @@ async function main() {
     role=excluded.role,content=excluded.content,model=excluded.model,dimensions=excluded.dimensions,
     vector=excluded.vector,norm=excluded.norm,content_hash=excluded.content_hash,created_at=excluded.created_at`);
   const all = readEpisodes();
+  const pending = [];
   let written = 0, skipped = 0;
   console.log(`[embedding-build] ${all.length} source episodes; model=${MODEL}`);
-  for (let i = 0; i < all.length; i++) {
-    const ep = all[i], content = String(ep.content).trim();
+  for (const ep of all) {
+    const content = String(ep.content).trim();
     const hash = crypto.createHash("sha256").update(content).digest("hex");
     const old = existing.get(String(ep.thread_id), Number(ep.sequence));
     if (old?.content_hash === hash && old?.model === MODEL) { skipped++; continue; }
-    const vector = await embed(content);
-    let squares = 0; for (const x of vector) squares += x * x;
-    upsert.run(String(ep.thread_id), Number(ep.sequence), ep.role || "", content, MODEL,
-      vector.length, Buffer.from(vector.buffer), Math.sqrt(squares), hash, new Date().toISOString());
-    written++;
-    if (written % 25 === 0) console.log(`[embedding-build] ${i + 1}/${all.length} processed`);
+    pending.push({ ep, content, hash });
+  }
+  const writeBatch = db.transaction(rows => { for (const row of rows) upsert.run(...row); });
+  const batchSize = Math.max(1, Number(process.env.OLLAMA_EMBED_BATCH_SIZE) || 32);
+  for (let start = 0; start < pending.length; start += batchSize) {
+    const batch = pending.slice(start, start + batchSize);
+    const vectors = await embedMany(batch.map(item => item.content));
+    writeBatch(batch.map((item, index) => {
+      const vector = vectors[index];
+      let squares = 0; for (const x of vector) squares += x * x;
+      return [String(item.ep.thread_id), Number(item.ep.sequence), item.ep.role || "", item.content,
+        MODEL, vector.length, Buffer.from(vector.buffer), Math.sqrt(squares), item.hash, new Date().toISOString()];
+    }));
+    written += batch.length;
+    console.log(`[embedding-build] ${written}/${pending.length} written (${skipped} unchanged)`);
   }
   db.close();
   console.log(`[embedding-build] done: ${written} written, ${skipped} unchanged -> ${DB_PATH}`);
