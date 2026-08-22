@@ -99,25 +99,31 @@ function safePart(value) {
 
 function nowIso() { return new Date().toISOString(); }
 
-const OLLAMA_URL = (process.env.OLLAMA_HOST || "http://127.0.0.1:11434").replace(/\/$/, "");
-const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
-const OLLAMA_EMBED_TIMEOUT_MS = Math.max(500, Number(process.env.OLLAMA_EMBED_TIMEOUT_MS) || 5000);
-const OLLAMA_EMBED_MIN_SIMILARITY = Math.max(0, Math.min(1,
-  Number(process.env.OLLAMA_EMBED_MIN_SIMILARITY) || 0.72));
+function ollamaConfig() {
+  const configuredThreshold = Number(process.env.OLLAMA_EMBED_MIN_SIMILARITY);
+  return {
+    url: (process.env.OLLAMA_HOST || "http://127.0.0.1:11434").replace(/\/$/, ""),
+    model: process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text",
+    timeoutMs: Math.max(500, Number(process.env.OLLAMA_EMBED_TIMEOUT_MS) || 5000),
+    minSimilarity: Math.max(0, Math.min(1,
+      Number.isFinite(configuredThreshold) ? configuredThreshold : 0.72)),
+  };
+}
 
 function embedWithOllamaSync(text) {
   const input = String(text || "").trim();
   if (!input) return null;
+  const config = ollamaConfig();
   const curl = process.platform === "win32" ? "curl.exe" : "curl";
   const response = spawnSync(curl, [
     "--silent", "--show-error", "--fail",
-    "--max-time", String(Math.ceil(OLLAMA_EMBED_TIMEOUT_MS / 1000)),
+    "--max-time", String(Math.ceil(config.timeoutMs / 1000)),
     "-H", "Content-Type: application/json", "--data-binary", "@-",
-    `${OLLAMA_URL}/api/embed`,
+    `${config.url}/api/embed`,
   ], {
-    input: JSON.stringify({ model: OLLAMA_EMBED_MODEL, input }),
+    input: JSON.stringify({ model: config.model, input }),
     encoding: "utf8", windowsHide: true,
-    timeout: OLLAMA_EMBED_TIMEOUT_MS + 1000, maxBuffer: 16 * 1024 * 1024,
+    timeout: config.timeoutMs + 1000, maxBuffer: 16 * 1024 * 1024,
   });
   if (response.status !== 0) throw new Error(String(response.stderr || `curl exit ${response.status}`).trim());
   const payload = JSON.parse(response.stdout);
@@ -783,6 +789,7 @@ class LocalMemoryService {
     if (!BetterSqlite3) return;
     const content = String(ep.content || "").trim();
     if (!content || ep.deleted) return;
+    const config = ollamaConfig();
     const vector = embedWithOllamaSync(content);
     const norm = vectorNorm(vector);
     if (!norm) throw new Error("Ollama returned a zero vector");
@@ -795,11 +802,12 @@ class LocalMemoryService {
         model=excluded.model, dimensions=excluded.dimensions, vector=excluded.vector,
         norm=excluded.norm, content_hash=excluded.content_hash, created_at=excluded.created_at
     `).run(String(ep.thread_id), Number(ep.sequence), ep.role || "", content,
-      OLLAMA_EMBED_MODEL, vector.length, Buffer.from(vector.buffer), norm,
+      config.model, vector.length, Buffer.from(vector.buffer), norm,
       crypto.createHash("sha256").update(content).digest("hex"), nowIso());
   }
 
   _searchWithEmbeddings(threadId, query, cutSeq, maxResults) {
+    const config = ollamaConfig();
     const queryVector = embedWithOllamaSync(query);
     const queryNorm = vectorNorm(queryVector);
     if (!queryNorm) return [];
@@ -816,7 +824,7 @@ class LocalMemoryService {
       let dot = 0;
       for (let i = 0; i < queryVector.length; i++) dot += queryVector[i] * stored[i];
       return { ...row, similarity: dot / (queryNorm * row.norm) };
-    }).filter(row => row.similarity >= OLLAMA_EMBED_MIN_SIMILARITY)
+    }).filter(row => row.similarity >= config.minSimilarity)
       .sort((a, b) => b.similarity - a.similarity ||
       fts5TierRank(b.tier) - fts5TierRank(a.tier) || b.seq - a.seq).slice(0, maxResults);
   }

@@ -5,8 +5,11 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { LocalMemoryService } = require("../src/local-memory-service");
 
 const port = 19000 + Math.floor(Math.random() * 1000);
+// Hosts may load Prism before dotenv. Configuration must be read when an
+// embedding is requested, not frozen at module import time.
 process.env.OLLAMA_HOST = `http://127.0.0.1:${port}`;
 process.env.OLLAMA_EMBED_TIMEOUT_MS = "2000";
 const serverCode = `
@@ -28,7 +31,6 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   let mem;
   try {
     await wait(300);
-    const { LocalMemoryService } = require("../src/local-memory-service");
     mem = new LocalMemoryService({ vaultPath: vault, logger: { log() {}, error() {} } });
     const cat = mem.appendEpisode({ threadId: "t", role: "assistant", text: "Kitty ate fish today" });
     mem.appendEpisode({ threadId: "t", role: "assistant", text: "We walked on the beach" });
