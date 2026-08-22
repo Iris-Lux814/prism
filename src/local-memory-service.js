@@ -50,14 +50,13 @@ function buildFts5Query(raw) {
 
 // ─── DeepSeek ─────────────────────────────────────────────────────────────────
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
-
 async function callDeepSeek(messages, { max_tokens = 900 } = {}) {
-  if (!DEEPSEEK_API_KEY) {
+  const apiKey = process.env.DEEPSEEK_API_KEY || "";
+  const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
+  if (!apiKey) {
     throw new Error("DEEPSEEK_API_KEY is required to run the memory compiler");
   }
-  const body = JSON.stringify({ model: DEEPSEEK_MODEL, messages, max_tokens });
+  const body = JSON.stringify({ model, messages, max_tokens });
   const raw = await new Promise((resolve, reject) => {
     const chunks = [];
     const req = https.request({
@@ -66,7 +65,7 @@ async function callDeepSeek(messages, { max_tokens = 900 } = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Length": Buffer.byteLength(body),
       },
     }, (res) => {
@@ -99,6 +98,8 @@ function nowIso() { return new Date().toISOString(); }
 const OLLAMA_URL = (process.env.OLLAMA_HOST || "http://127.0.0.1:11434").replace(/\/$/, "");
 const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
 const OLLAMA_EMBED_TIMEOUT_MS = Math.max(500, Number(process.env.OLLAMA_EMBED_TIMEOUT_MS) || 5000);
+const OLLAMA_EMBED_MIN_SIMILARITY = Math.max(0, Math.min(1,
+  Number(process.env.OLLAMA_EMBED_MIN_SIMILARITY) || 0.72));
 
 function embedWithOllamaSync(text) {
   const input = String(text || "").trim();
@@ -284,7 +285,7 @@ class LocalMemoryService {
     }
     return records
       .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
-      .slice(-Math.max(1, Math.min(Number(limit) || 160, 500)));
+      .slice(-Math.max(1, Math.min(Number(limit) || 160, 10000)));
   }
 
   appendEpisode({ threadId, role, text, telegramMessageId = null, kind = "chat_message", timestamp = nowIso() }) {
@@ -519,7 +520,8 @@ class LocalMemoryService {
     }
 
     // 触发词检测：命中时注入 EVIDENCE BUNDLE（明确追忆模式）
-    if (userText && hasRecallTrigger(userText)) {
+    const explicitRecall = userText && hasRecallTrigger(userText);
+    if (explicitRecall) {
       const cards = this.searchEpisodes(threadId, userText, 2);
       if (cards.length > 0) {
         const centerSeqs = cards.map(c => c.sequence);
@@ -530,6 +532,28 @@ class LocalMemoryService {
         }
       } else {
         this.logger.log("[memory] RECALL trigger hit but no cards found");
+      }
+    }
+
+    // High-confidence associative recall on every substantive turn.
+    if (userText && !explicitRecall && String(userText).trim().length >= 4 && BetterSqlite3) {
+      try {
+        const state = this.getState(threadId);
+        const rows = this._searchWithEmbeddings(
+          threadId, userText, Math.max(0, (state.episode_counter || 0) - 20), 2
+        );
+        if (rows.length > 0) {
+          const bundle = this.buildEvidenceBundle(threadId, rows.map(row => row.seq), {
+            window: 1, maxChars: 500, maxEpisodes: 4,
+          });
+          if (bundle) {
+            output.push("[SEMANTIC RECALL - relevant past evidence; use only when naturally related]");
+            output.push(bundle);
+            this.logger.log(`[memory] SEMANTIC-RECALL seqs=${rows.map(row => row.seq).join(",")} scores=${rows.map(row => row.similarity.toFixed(3)).join(",")}`);
+          }
+        }
+      } catch (e) {
+        this.logger && this.logger.log(`[memory] semantic recall skipped: ${e.message}`);
       }
     }
 
@@ -556,11 +580,13 @@ class LocalMemoryService {
 
   // ─── Evidence bundle for explicit recall queries ──────────────────────────
 
-  buildEvidenceBundle(threadId, centerSeqs) {
-    const WINDOW = 3;
-    const MAX_CHARS = 1200;
+  buildEvidenceBundle(threadId, centerSeqs, {
+    window = 3, maxChars = 1200, maxEpisodes = 8,
+  } = {}) {
+    const WINDOW = Math.max(0, Math.min(Number(window) || 0, 5));
+    const MAX_CHARS = Math.max(200, Math.min(Number(maxChars) || 1200, 2400));
 
-    const timeline = this.getTimeline(threadId, 500).filter(ep => !ep.deleted && ep.content);
+    const timeline = this.getTimeline(threadId, 10000).filter(ep => !ep.deleted && ep.content);
     const seqToIdx = new Map(timeline.map((ep, i) => [ep.sequence, i]));
 
     const seqSet = new Set();
@@ -575,7 +601,7 @@ class LocalMemoryService {
     const selected = timeline
       .filter(ep => seqSet.has(ep.sequence))
       .sort((a, b) => a.sequence - b.sequence)
-      .slice(0, 8);
+      .slice(0, Math.max(1, Math.min(Number(maxEpisodes) || 8, 12)));
 
     if (selected.length === 0) return null;
 
@@ -785,7 +811,8 @@ class LocalMemoryService {
       let dot = 0;
       for (let i = 0; i < queryVector.length; i++) dot += queryVector[i] * stored[i];
       return { ...row, similarity: dot / (queryNorm * row.norm) };
-    }).sort((a, b) => b.similarity - a.similarity ||
+    }).filter(row => row.similarity >= OLLAMA_EMBED_MIN_SIMILARITY)
+      .sort((a, b) => b.similarity - a.similarity ||
       fts5TierRank(b.tier) - fts5TierRank(a.tier) || b.seq - a.seq).slice(0, maxResults);
   }
 

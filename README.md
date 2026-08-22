@@ -119,12 +119,15 @@ ollama pull nomic-embed-text
 npm run build-embeddings
 ```
 
-迁移脚本会为已有 source 原文生成向量并写入 `lifecycle.db` 的 `embeddings` 表；
+迁移脚本会批量为已有 source 原文生成向量并写入 `lifecycle.db` 的 `embeddings` 表；
 重复运行时会通过内容哈希跳过未变化记录。新消息会同步生成 embedding。
-`searchEpisodes()` 的外部接口保持不变，Ollama 未启动、模型缺失或请求超时时自动回退 FTS5。
+`searchEpisodes()` 的外部接口保持不变。普通对话也会做一次高置信度语义联想：
+只有超过阈值的旧经历才注入一个约 500 字的小证据窗口；明确追忆时才使用较完整窗口。
+Ollama 未启动、模型缺失或请求超时时自动回退 FTS5。
 
 可通过 `OLLAMA_HOST`、`OLLAMA_EMBED_MODEL` 和
-`OLLAMA_EMBED_TIMEOUT_MS` 调整服务地址、模型和超时。
+`OLLAMA_EMBED_TIMEOUT_MS`、`OLLAMA_EMBED_MIN_SIMILARITY` 和
+`OLLAMA_EMBED_BATCH_SIZE` 调整服务地址、模型、超时、主动联想阈值和迁移批大小。
 
 ---
 

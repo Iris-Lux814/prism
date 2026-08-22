@@ -34,9 +34,15 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
     mem.appendEpisode({ threadId: "t", role: "assistant", text: "We walked on the beach" });
     const results = mem.searchEpisodes("t", "How is the cat?", 1, { beforeSeq: 999 });
     assert.strictEqual(results[0]?.sequence, cat.sequence);
+    for (let i = 0; i < 21; i++) {
+      mem.appendEpisode({ threadId: "t", role: "user", text: `unrelated filler ${i}` });
+    }
+    const packet = mem.buildContinuityPacket("t", 2000, { userText: "How is kitty doing?" });
+    assert.match(packet, /SEMANTIC RECALL/);
+    assert.match(packet, /Kitty ate fish today/);
     const Database = require("better-sqlite3");
     const db = new Database(path.join(vault, "derived", "lifecycle.db"));
-    assert.strictEqual(db.prepare("SELECT count(*) n FROM embeddings").get().n, 2);
+    assert.strictEqual(db.prepare("SELECT count(*) n FROM embeddings").get().n, 23);
     db.close();
     console.log("embedding semantic ranking, schema and incremental writes passed");
   } finally {
