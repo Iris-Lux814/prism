@@ -18,7 +18,7 @@ try { Database = require("better-sqlite3"); } catch {
   process.exit(1);
 }
 
-const VAULT = process.env.TELEGRAM_MEMORY_VAULT || process.env.VAULT_PATH || "./memory-vault";
+const VAULT = process.env.PRISM_VAULT || process.env.TELEGRAM_MEMORY_VAULT || process.env.VAULT_PATH || "./memory-vault";
 const DB_PATH = path.join(VAULT, "derived", "lifecycle.db");
 
 // ── 读 source JSONL ────────────────────────────────────────────────────────────
@@ -106,6 +106,10 @@ function setupDb(db) {
       PRIMARY KEY (thread_id, seq)
     );
     CREATE INDEX IF NOT EXISTS idx_episode_tier_tier ON episode_tier(thread_id, tier);
+    CREATE TABLE IF NOT EXISTS episode_activity (
+      thread_id TEXT NOT NULL, seq INTEGER NOT NULL, last_recalled_at TEXT,
+      recall_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (thread_id, seq)
+    );
   `);
 }
 
@@ -126,8 +130,9 @@ function build() {
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   // Rebuild only keyword data; preserve semantic vectors stored in the same DB.
-  db.exec("DROP TABLE IF EXISTS source_fts; DELETE FROM episode_tier;");
+  db.exec("DROP TABLE IF EXISTS source_fts;");
   setupDb(db);
+  db.exec("DELETE FROM episode_tier;");
 
   const insertFts = db.prepare("INSERT INTO source_fts(thread_id, seq, role, content) VALUES (?, ?, ?, ?)");
   const insertTier = db.prepare("INSERT OR REPLACE INTO episode_tier(thread_id, seq, tier) VALUES (?, ?, ?)");

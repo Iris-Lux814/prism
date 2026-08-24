@@ -1,10 +1,10 @@
 {
   "name": "prism",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Source-first local memory vault for AI companions with Ollama semantic search, FTS5 fallback, and lifecycle management.",
   "main": "src/local-memory-service.js",
   "scripts": {
-    "test": "node test/embedding.test.js",
+    "test": "node test/embedding.test.js && node test/lifecycle.test.js",
     "build-index": "node src/build-fts5-index.js",
     "build-embeddings": "node src/build-embeddings.js",
     "maintenance": "node src/lifecycle-maintenance.js"

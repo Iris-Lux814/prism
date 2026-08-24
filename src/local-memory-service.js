@@ -374,12 +374,12 @@ class LocalMemoryService {
     }
 
     const systemPrompt = [
-      "你是对话记忆压缩器。根据给定的对话片段，提取并压缩关键状态。",
+      "你是私人关系对话的连续性编译器。根据原始对话细致保留事实、关系语气、情绪因果、当前话题、指代对象、双方刚刚说过什么以及尚未完成的事项；不能只留下抽象主题。",
       "你必须仅输出一个 JSON 对象，不要有任何 markdown、代码块或解释文字。",
-      "memory_atoms 规则：最多5条。必须优先继承上一轮 prev_atoms 中涉及【日期、已发生的重大事件、约定、关系节点】的条目（即使本轮没有提到），再补充本轮新事实。",
-      "数量限制：episodes 最多2条，facts 最多4条，perspectives 最多2条；每个 source_ids 最多6个，只保留最直接证据。",
+      "memory_atoms 规则：最多10条。优先继承 prev_atoms 中仍然有效的日期、重大事件、约定、关系节点和持续状态，再补充本轮新事实；已经被当前对话纠正或结束的旧状态必须更新，不能复活。",
+      "数量限制：episodes 最多5条，facts 最多10条，perspectives 最多6条；每个 source_ids 最多8个，只保留直接证据。必须单独保留最后正在进行的话题、最后一个问题/邀请、说话者真实意图以及代词具体指向。",
       "要求字段（均为中文内容）：",
-      '{"thread_spine":"<=90字，当前关系/状态的最简描述","episode_delta":"<=70字，这次对话最重要的变化","memory_atoms":["<=55字，最多5条；日期/事件类事实必须继承，见上方规则"],"open_loops":["<=35字，最多2条，未完成的事项"],"friction_markers":["<=60字，最多3条，不确定/有争议/模糊的时刻，无则省略"],"compression_note":"必填，1-3句中文：保留了什么，没注入什么，为什么","episodes":[{"summary":"<=60字，这个对话段的核心事件","source_ids":["episode id列表"],"role_balance":"user_led|assistant_led|balanced"}],"facts":[{"content":"<=50字，可复用的具体事实","source_ids":["episode id列表"],"confidence":"high|medium|low"}],"perspectives":[{"content":"<=50字，某一方对某事的观点或感受","holder":"user|assistant","source_ids":["episode id列表"]}]}',
+      '{"thread_spine":"<=220字，细致描述当前关系、正在发生的事和最近对话落点","episode_delta":"<=180字，本段发生的变化及最后如何落下","memory_atoms":["<=100字，最多10条；保留具体人物、对象、日期、事件、约定与持续状态"],"open_loops":["<=100字，最多5条；包括最后尚待回应的问题、邀请、承诺和未完成操作"],"friction_markers":["<=100字，最多5条；记录误解、纠正、争议与不能确定的地方，无则省略"],"compression_note":"必填，2-4句中文：明确保留了哪些具体连续性、哪些细节未纳入及原因","episodes":[{"summary":"<=120字，按发生顺序概括一个具体事件，保留谁说了什么及结果","source_ids":["episode id列表"],"role_balance":"user_led|assistant_led|balanced"}],"facts":[{"content":"<=100字，可复用且有明确证据的具体事实","source_ids":["episode id列表"],"confidence":"high|medium|low"}],"perspectives":[{"content":"<=100字，某一方的具体观点、情绪、意图及其触发原因","holder":"user|assistant","source_ids":["episode id列表"]}]}',
     ].join("\n");
 
     const userPrompt = [
@@ -405,7 +405,7 @@ class LocalMemoryService {
       raw = await callDeepSeek([
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
-      ], { max_tokens: 1800 });
+      ], { max_tokens: 3200 });
     } catch (e) {
       this.logger.error(`[compiler] DeepSeek call failed: ${e.message}`);
       appendJsonl(path.join(this.root, "ledger", "compiler-receipts.jsonl"), {
@@ -473,14 +473,14 @@ class LocalMemoryService {
 
     const state = {
       ...previous,
-      thread_spine: limit(data.thread_spine, 180),
-      episode_delta: limit(data.episode_delta, 140),
+      thread_spine: limit(data.thread_spine, 440),
+      episode_delta: limit(data.episode_delta, 360),
       memory_atoms: (Array.isArray(data.memory_atoms) ? data.memory_atoms : [])
-        .map((item) => limit(item, 100)).filter(Boolean).slice(0, 5),
+        .map((item) => limit(item, 200)).filter(Boolean).slice(0, 10),
       open_loops: (Array.isArray(data.open_loops) ? data.open_loops : [])
-        .map((item) => limit(item, 80)).filter(Boolean).slice(0, 3),
+        .map((item) => limit(item, 200)).filter(Boolean).slice(0, 5),
       friction_markers: (Array.isArray(data.friction_markers) ? data.friction_markers : [])
-        .map((item) => limit(item, 80)).filter(Boolean).slice(0, 3),
+        .map((item) => limit(item, 200)).filter(Boolean).slice(0, 5),
       compression_history: compressionHistory,
       last_compiled_counter: Math.max(previous.last_compiled_counter, sourceEnd),
       updated_at: nowIso(),
@@ -531,14 +531,15 @@ class LocalMemoryService {
     }
 
     // 触发词检测：命中时注入 EVIDENCE BUNDLE（明确追忆模式）
-    const explicitRecall = userText && hasRecallTrigger(userText);
+    const explicitRecall = userText && (hasRecallTrigger(userText) || /(?:最后一次|上一次|上次|最近一次|什么时候|哪天|哪一次)/.test(String(userText)));
     if (explicitRecall) {
-      const cards = this.searchEpisodes(threadId, userText, 2);
+      const cards = this.searchEpisodes(threadId, userText, 2, { includeArchive: true });
       if (cards.length > 0) {
         const centerSeqs = cards.map(c => c.sequence);
         const bundle = this.buildEvidenceBundle(threadId, centerSeqs);
         if (bundle) {
           output.push(bundle);
+          this.recordRecall(threadId, centerSeqs);
           this.logger.log(`[memory] RECALL evidence-bundle centerSeqs=${centerSeqs.join(",")}`);
         }
       } else {
@@ -560,6 +561,7 @@ class LocalMemoryService {
           if (bundle) {
             output.push("[SEMANTIC RECALL - relevant past evidence; use only when naturally related]");
             output.push(bundle);
+            this.recordRecall(threadId, rows.map(row => row.seq));
             this.logger.log(`[memory] SEMANTIC-RECALL seqs=${rows.map(row => row.seq).join(",")} scores=${rows.map(row => row.similarity.toFixed(3)).join(",")}`);
           }
         }
@@ -782,6 +784,10 @@ class LocalMemoryService {
         created_at TEXT NOT NULL, PRIMARY KEY (thread_id, seq)
       );
       CREATE INDEX IF NOT EXISTS idx_embeddings_thread_seq ON embeddings(thread_id, seq);
+      CREATE TABLE IF NOT EXISTS episode_activity (
+        thread_id TEXT NOT NULL, seq INTEGER NOT NULL, last_recalled_at TEXT,
+        recall_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (thread_id, seq)
+      );
     `);
   }
 
@@ -806,7 +812,7 @@ class LocalMemoryService {
       crypto.createHash("sha256").update(content).digest("hex"), nowIso());
   }
 
-  _searchWithEmbeddings(threadId, query, cutSeq, maxResults) {
+  _searchWithEmbeddings(threadId, query, cutSeq, maxResults, { includeArchive = false } = {}) {
     const config = ollamaConfig();
     const queryVector = embedWithOllamaSync(query);
     const queryNorm = vectorNorm(queryVector);
@@ -817,9 +823,9 @@ class LocalMemoryService {
       SELECT e.seq, e.content, e.role, e.dimensions, e.vector, e.norm, et.tier
       FROM embeddings e JOIN episode_tier et
         ON et.thread_id = e.thread_id AND et.seq = e.seq
-      WHERE e.thread_id = ? AND e.seq <= ? AND et.tier IN ('hot', 'warm', 'cold')
+      WHERE e.thread_id = ? AND e.seq <= ? AND et.tier IN ('hot', 'warm', 'cold', 'archive')
     `).all(String(threadId), cutSeq);
-    return rows.filter(row => row.dimensions === queryVector.length && row.norm > 0).map(row => {
+    return rows.filter(row => (includeArchive || row.tier !== "archive") && row.dimensions === queryVector.length && row.norm > 0).map(row => {
       const stored = new Float32Array(row.vector.buffer, row.vector.byteOffset, row.dimensions);
       let dot = 0;
       for (let i = 0; i < queryVector.length; i++) dot += queryVector[i] * stored[i];
@@ -856,14 +862,105 @@ class LocalMemoryService {
     } catch {}
   }
 
+  // Recompute the effective source tier from all derived episode/fact ranges.
+  // The coldest overlapping tier wins; uncompiled source remains hot.
+  syncAllFts5Tiers({ preserveExisting = false } = {}) {
+    if (this._fts5Disabled || !BetterSqlite3) return 0;
+    const effective = new Map();
+    for (const sub of ["episodes", "facts"]) {
+      const dir = path.join(this.root, "derived", sub);
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith(".json") || name.endsWith(".bak.json")) continue;
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+          const threadId = String(data.thread_id || "");
+          const start = Number(data.source_range?.start || 0);
+          const end = Number(data.source_range?.end || 0);
+          const tier = Object.hasOwn(FTS5_TIER_RANK, data.tier) ? data.tier : "hot";
+          if (!threadId || start <= 0 || end < start) continue;
+          for (let seq = start; seq <= end; seq++) {
+            const key = `${threadId}:${seq}`, previous = effective.get(key);
+            if (!previous || fts5TierRank(tier) < fts5TierRank(previous)) effective.set(key, tier);
+          }
+        } catch {}
+      }
+    }
+    const db = this._fts5Db();
+    this._fts5EnsureSchema(db);
+    const reset = db.prepare("UPDATE episode_tier SET tier = 'hot'");
+    const current = db.prepare("SELECT tier FROM episode_tier WHERE thread_id = ? AND seq = ?");
+    const update = db.prepare(`INSERT INTO episode_tier(thread_id,seq,tier) VALUES (?,?,?)
+      ON CONFLICT(thread_id,seq) DO UPDATE SET tier=excluded.tier`);
+    db.transaction(() => {
+      if (!preserveExisting) reset.run();
+      for (const [key, tier] of effective) {
+        const split = key.lastIndexOf(":");
+        const threadId = key.slice(0, split), seq = Number(key.slice(split + 1));
+        const existing = preserveExisting ? current.get(threadId, seq)?.tier : null;
+        update.run(threadId, seq, existing && fts5TierRank(existing) < fts5TierRank(tier) ? existing : tier);
+      }
+    })();
+    return effective.size;
+  }
+
+  // Successful evidence recall reheats covering derived memories and restarts
+  // their cooling clock. The append-only source evidence is never modified.
+  recordRecall(threadId, sequences) {
+    const wanted = new Set((Array.isArray(sequences) ? sequences : [sequences]).map(Number).filter(Number.isFinite));
+    if (!wanted.size) return 0;
+    const heated = new Set(wanted);
+    const at = nowIso(), auditFile = path.join(this.root, "ledger", "lifecycle-audit.jsonl");
+    let updated = 0, tierChanged = false;
+    for (const sub of ["episodes", "facts", "perspectives"]) {
+      const dir = path.join(this.root, "derived", sub);
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith(".json") || name.endsWith(".bak.json")) continue;
+        const file = path.join(dir, name);
+        try {
+          const data = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (String(data.thread_id) !== String(threadId) || data.pinned) continue;
+          const start = Number(data.source_range?.start || 0), end = Number(data.source_range?.end || 0);
+          if (![...wanted].some(seq => seq >= start && seq <= end)) continue;
+          for (let seq = start; seq <= end; seq++) heated.add(seq);
+          const oldTier = data.tier || "hot";
+          data.last_recalled_at = at;
+          data.recall_count = Math.max(0, Number(data.recall_count) || 0) + 1;
+          data.tier = "hot";
+          data.lifecycle_maintained_at = at;
+          fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+          appendJsonl(auditFile, { at, action: oldTier === "hot" ? "recall_touch" : "auto_reheat", actor: "prism", file: path.relative(this.root, file), old_tier: oldTier, new_tier: "hot", sequences: [...wanted] });
+          updated++;
+          if (oldTier !== "hot") tierChanged = true;
+        } catch (e) {
+          this.logger && this.logger.log(`[lifecycle] recall tracking skipped for ${name}: ${e.message}`);
+        }
+      }
+    }
+    if (tierChanged) this.syncAllFts5Tiers({ preserveExisting: true });
+    try {
+      const db = this._fts5Db();
+      this._fts5EnsureSchema(db);
+      const touch = db.prepare(`INSERT INTO episode_activity(thread_id,seq,last_recalled_at,recall_count)
+        VALUES (?,?,?,1) ON CONFLICT(thread_id,seq) DO UPDATE SET
+        last_recalled_at=excluded.last_recalled_at, recall_count=episode_activity.recall_count+1`);
+      const heat = db.prepare("UPDATE episode_tier SET tier='hot' WHERE thread_id=? AND seq=?");
+      db.transaction(() => { for (const seq of heated) { touch.run(String(threadId), seq, at); heat.run(String(threadId), seq); } })();
+    } catch (e) {
+      this.logger && this.logger.log(`[lifecycle] source recall tracking skipped: ${e.message}`);
+    }
+    return updated;
+  }
+
   // FTS5 layered search: Hot → Warm → Cold; Archive never returned
-  _searchWithFts5(threadId, ftsQuery, cutSeq, maxResults) {
+  _searchWithFts5(threadId, ftsQuery, cutSeq, maxResults, { includeArchive = false } = {}) {
     const db = this._fts5Db();
     this._fts5EnsureSchema(db);
     const results = [];
     const seen = new Set();
 
-    for (const tier of ["hot", "warm", "cold"]) {
+    for (const tier of includeArchive ? ["hot", "warm", "cold", "archive"] : ["hot", "warm", "cold"]) {
       if (results.length >= maxResults) break;
       const needed = maxResults - results.length;
       let rows;
@@ -895,18 +992,58 @@ class LocalMemoryService {
 
   // ─── searchEpisodes: embedding 优先，失败时回退 FTS5 / bigram ─────────────
 
-  searchEpisodes(threadId, query, maxResults = 2, { beforeSeq = null } = {}) {
+  searchEpisodes(threadId, query, maxResults = 2, { beforeSeq = null, includeArchive = false } = {}) {
     const timeline = this.getTimeline(threadId, 500);
     const lastSeq = timeline.length > 0 ? timeline[timeline.length - 1].sequence : 0;
     // cutSeq for bigram fallback (timeline-window)
     const corpusCutSeq = beforeSeq !== null ? beforeSeq : Math.max(0, lastSeq - 20);
-    const corpus = timeline.filter(ep => !ep.deleted && ep.content && ep.sequence <= corpusCutSeq);
+    let allowedSeqs = null;
+    if (BetterSqlite3 && !includeArchive) {
+      try {
+        allowedSeqs = new Set(this._fts5Db().prepare("SELECT seq FROM episode_tier WHERE thread_id = ? AND tier != 'archive'").all(String(threadId)).map(row => Number(row.seq)));
+      } catch {}
+    }
+    const corpus = timeline.filter(ep => !ep.deleted && ep.content && ep.sequence <= corpusCutSeq && (!allowedSeqs || allowedSeqs.has(Number(ep.sequence))));
+
+    // Questions such as “最后一次玩玩具是什么时候” need chronological lexical
+    // precision. Pure semantic similarity can confuse the concrete noun with
+    // related concepts (for example 4399 or a shared-body doll), while Chinese
+    // FTS tokenization does not reliably match a word embedded in a sentence.
+    // Search the complete embedding corpus for salient CJK bigrams first and
+    // prefer the newest matching source episode.
+    if (BetterSqlite3 && /(?:最后一次|上一次|上次|最近一次|什么时候|哪天|哪一次)/.test(String(query || ""))) {
+      try {
+        const stop = new Set(["我们","你们","他们","最后","一次","上次","最近","什么","时候","哪天","哪一","一次","是什","么时","具是","后一"]);
+        const hanzi = String(query || "").match(/[一-鿿]/g) || [];
+        const terms = [...new Set(hanzi.map((_, i) => hanzi.slice(i, i + 2).join("")).filter(term => term.length === 2 && !stop.has(term)))];
+        if (terms.length) {
+          const state = this.getState(threadId);
+          const cutSeq = beforeSeq !== null ? beforeSeq : Math.max(0, (state.episode_counter || lastSeq) - 20);
+          const rows = this._fts5Db().prepare(`
+            SELECT e.seq, e.content, e.role, et.tier
+            FROM embeddings e JOIN episode_tier et
+              ON et.thread_id=e.thread_id AND et.seq=e.seq
+            WHERE e.thread_id=? AND e.seq<=?
+          `).all(String(threadId), cutSeq).filter(row => includeArchive || row.tier !== "archive");
+          const scored = rows.map(row => ({ ...row, lexicalScore: terms.reduce((sum, term) => sum + (String(row.content).includes(term) ? 1 : 0), 0) }))
+            .filter(row => row.lexicalScore > 0)
+            .sort((a, b) => b.lexicalScore - a.lexicalScore || b.seq - a.seq)
+            .slice(0, maxResults);
+          if (scored.length) {
+            const timelineBySeq = new Map(timeline.map(ep => [ep.sequence, ep]));
+            return scored.map(row => timelineBySeq.get(row.seq) || { sequence: row.seq, content: row.content, role: row.role, id: null });
+          }
+        }
+      } catch (e) {
+        this.logger && this.logger.log(`[lexical-recall] temporal search skipped: ${e.message}`);
+      }
+    }
 
     if (BetterSqlite3 && String(query || "").trim()) {
       try {
         const state = this.getState(threadId);
         const cutSeq = beforeSeq !== null ? beforeSeq : Math.max(0, (state.episode_counter || lastSeq) - 20);
-        const rows = this._searchWithEmbeddings(threadId, query, cutSeq, maxResults);
+        const rows = this._searchWithEmbeddings(threadId, query, cutSeq, maxResults, { includeArchive });
         if (rows.length > 0) {
           const timelineBySeq = new Map(timeline.map(ep => [ep.sequence, ep]));
           return rows.map(row => timelineBySeq.get(row.seq) || {
@@ -926,7 +1063,7 @@ class LocalMemoryService {
           // FTS5 cutSeq uses state.episode_counter (covers full history, not just recent 500)
           const state = this.getState(threadId);
           const fts5CutSeq = beforeSeq !== null ? beforeSeq : Math.max(0, (state.episode_counter || lastSeq) - 20);
-          const rows = this._searchWithFts5(threadId, ftsQuery, fts5CutSeq, maxResults);
+          const rows = this._searchWithFts5(threadId, ftsQuery, fts5CutSeq, maxResults, { includeArchive });
           if (rows.length > 0) {
             // FTS5 seqs may be outside the 500-episode window — use FTS5 data directly
             // then enrich with timeline data where available (for deleted flag etc.)

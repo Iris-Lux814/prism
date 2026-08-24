@@ -6,7 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 
-const VAULT = process.env.TELEGRAM_MEMORY_VAULT || process.env.VAULT_PATH || "./memory-vault";
+const VAULT = process.env.PRISM_VAULT || process.env.TELEGRAM_MEMORY_VAULT || process.env.VAULT_PATH || "./memory-vault";
 const DB_PATH = path.join(VAULT, "derived", "lifecycle.db");
 const OLLAMA_URL = (process.env.OLLAMA_HOST || "http://127.0.0.1:11434").replace(/\/$/, "");
 const MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";

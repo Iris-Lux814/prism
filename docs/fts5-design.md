@@ -61,11 +61,11 @@ Hot → Warm → Cold
    - **Hot**：直接参与，最高优先级
    - **Warm**：触发词命中时参与
    - **Cold**：触发词命中时参与，但在 Evidence Bundle 中附注 `[冷层记忆]` 和 event_shadow
-   - **Archive**：**永不自动召回**，不参与任何检索结果
+   - **Archive**：不参与普通联想；用户明确追忆过去时可按需参与检索
 3. 同一层内，按召回得分（FTS5 BM25）排序，取前 N 条
 4. 拿命中的 seq 调用 `buildEvidenceBundle`，返回 source 原文
 
-**Archive 的访问方式**：只能通过 Dashboard 手动查看，或触发词 + 显式指令（待定）回源。
+**Archive 的访问方式**：Dashboard 手动查看，或由“上次、最后一次、什么时候”等明确追忆触发回源。
 
 ---
 

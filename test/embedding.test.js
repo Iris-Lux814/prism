@@ -42,14 +42,43 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
     const packet = mem.buildContinuityPacket("t", 2000, { userText: "How is kitty doing?" });
     assert.match(packet, /SEMANTIC RECALL/);
     assert.match(packet, /Kitty ate fish today/);
+    const earlierGame = mem.appendEpisode({ threadId: "temporal", role: "user", text: "上周我们一起玩过桌游。" });
+    const latestGame = mem.appendEpisode({ threadId: "temporal", role: "assistant", text: "昨天最后一次一起玩桌游，晚上八点结束。" });
+    for (let i = 0; i < 21; i++) mem.appendEpisode({ threadId: "temporal", role: "user", text: `无关近况 ${i}` });
+    const temporal = mem.searchEpisodes("temporal", "我们最后一次玩桌游是什么时候？", 1, { includeArchive: true });
+    assert.strictEqual(temporal[0]?.sequence, latestGame.sequence);
+    assert.notStrictEqual(temporal[0]?.sequence, earlierGame.sequence);
+    const temporalPacket = mem.buildContinuityPacket("temporal", 2000, { userText: "我们最后一次玩桌游是什么时候？" });
+    assert.match(temporalPacket, /昨天最后一次一起玩桌游/);
     const Database = require("better-sqlite3");
+    const derivedDir = path.join(vault, "derived", "episodes");
+    fs.writeFileSync(path.join(derivedDir, "thread-t-seq-2.json"), JSON.stringify({
+      thread_id: "t", source_range: { start: 1, end: 2 }, tier: "cold", episodes: [],
+    }));
+    assert.strictEqual(mem.syncAllFts5Tiers(), 2);
     const db = new Database(path.join(vault, "derived", "lifecycle.db"));
-    assert.strictEqual(db.prepare("SELECT count(*) n FROM embeddings").get().n, 23);
+    assert.strictEqual(db.prepare("SELECT count(*) n FROM embeddings").get().n, 46);
+    assert.deepStrictEqual(db.prepare("SELECT seq,tier FROM episode_tier WHERE thread_id='t' AND seq <= 3 ORDER BY seq").all(), [
+      { seq: 1, tier: "cold" }, { seq: 2, tier: "cold" }, { seq: 3, tier: "hot" },
+    ]);
+    const archivedFile = JSON.parse(fs.readFileSync(path.join(derivedDir, "thread-t-seq-2.json"), "utf8"));
+    archivedFile.tier = "archive";
+    fs.writeFileSync(path.join(derivedDir, "thread-t-seq-2.json"), JSON.stringify(archivedFile));
+    mem.syncAllFts5Tiers();
+    assert.notStrictEqual(mem.searchEpisodes("t", "How is the cat?", 1, { beforeSeq: 999 })[0]?.sequence, cat.sequence);
+    assert.strictEqual(mem.searchEpisodes("t", "How is the cat?", 1, { beforeSeq: 999, includeArchive: true })[0]?.sequence, cat.sequence);
+    assert.strictEqual(mem.recordRecall("t", [1]), 1);
+    const reheated = JSON.parse(fs.readFileSync(path.join(derivedDir, "thread-t-seq-2.json"), "utf8"));
+    assert.strictEqual(reheated.tier, "hot");
+    assert.strictEqual(reheated.recall_count, 1);
+    assert.ok(reheated.last_recalled_at);
+    assert.deepStrictEqual(db.prepare("SELECT DISTINCT tier FROM episode_tier WHERE thread_id='t'").all(), [{ tier: "hot" }]);
     db.close();
     console.log("embedding semantic ranking, schema and incremental writes passed");
   } finally {
     if (mem?._fts5DbInst) mem._fts5DbInst.close();
     child.kill();
-    fs.rmSync(vault, { recursive: true, force: true });
+    try { fs.rmSync(vault, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+    catch (error) { if (error.code !== "EPERM") throw error; }
   }
 })().catch(error => { child.kill(); console.error(error); process.exit(1); });

@@ -18,9 +18,9 @@
 
 - **原始 source（JSONL）永不删除**：降温、到期、失效、supersede 均不触及 source 文件。
 - **Cold 层不是遗忘**：它保留"这件事发生过"的最小残影（`event_shadow`），触发词命中时仍可回源到 source Evidence Bundle。
-- **Archive 不等于删除**：不自动注入、不由维护脚本维护，但触发词命中时仍可按 `source_episode_ids` 回源查看原文。
+- **Archive 不等于删除**：不参加普通联想；用户明确追忆过去时仍可按 `source_episode_ids` 回源查看原文。
 - **到期/失效 = 退出自动召回**，不等于删除。任何时候都可以通过触发词或 Dashboard 手动拉取。
-- **importance 和 pinned 只能人工确认**：模型判断和召回次数只能产生升温"建议"，写入权限在人工（Dashboard）。
+- **importance 和 pinned 只能人工确认**：模型不能自行修改这两个字段。成功的证据召回可以自动把非 pinned 记忆重新升为 hot，并记录审计。
 
 ---
 
@@ -42,7 +42,7 @@
   "pinned": false,             // 人工确认常驻；true 时永不自动降温，只能人工解除
   "tier": "hot",               // "hot" | "warm" | "cold" | "archive"
   "last_recalled_at": null,    // ISO8601 | null，每次被 Evidence Bundle 命中时更新
-  "recall_count": 0,           // 被召回次数；召回次数增加只能触发升温"建议"，不能自动改变 tier 或 importance
+  "recall_count": 0,           // 被召回次数；成功召回会更新并把非 pinned 记忆升为 hot
   "expires_at": null,          // ISO8601 | null，到期后降至 cold（不删除）
   "valid_to": null,            // ISO8601 | null，事实失效日期（"当时的状态"）
   "superseded_by": null,       // episode/fact id | null，被更新的事实指向新记录
@@ -63,7 +63,7 @@
 | `superseded_by` | 指向同类更新的记录 id；被 supersede 的记录自动降为 cold |
 | `source_episode_ids` | Evidence Bundle 回源时用；Cold 层细节通过这些 id 从 source JSONL 拉取 |
 | `event_shadow` | 降入 Cold 时生成，≤30字，格式：`YYYY-MM-DD 一句话描述` |
-| `recall_count` | 统计用，只触发维护报告里的升温建议，不自动改变 tier 或 importance |
+| `recall_count` | 统计成功召回；召回会自动升温 tier，但不会修改 importance 或 pinned |
 
 ---
 
@@ -119,9 +119,10 @@ runLifecycleMaintenance(threadId)
 // 逻辑：
 // 1. 遍历所有 derived 文件
 // 2. 超过 expires_at → tier = "cold"，生成 event_shadow
-// 3. 超过 30 天未被召回且 importance < 0.3 → tier = "warm" → "cold"
-// 4. 写回 JSON；更新 SQLite 索引（如有）
-// 5. 不调用任何外部 API
+// 3. 默认超过 7/30/90 天未召回 → tier 依次降为 warm/cold/archive
+// 4. 成功召回 → 非 pinned 记录重新升为 hot，并更新 last_recalled_at/recall_count
+// 5. 写回 JSON；更新 SQLite 索引（如有）
+// 6. 不调用任何外部 API
 
 // Evidence Bundle 中：Cold 层命中时附注
 // [冷层记忆 - 仅残影，细节请看 source] event_shadow

@@ -84,7 +84,7 @@ const packet = memory.buildContinuityPacket("room-1", 280, {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `tier` | `hot \| warm \| cold \| archive` | 召回温度。搜索只返回 hot/warm/cold；archive 永不自动召回。 |
+| `tier` | `hot \| warm \| cold \| archive` | 召回温度。普通联想只返回 hot/warm/cold；用户明确追忆过去时可从 archive 回源。 |
 | `importance` | `0.0 – 1.0` | 人工分配的权重。模型可建议，不可自行设置。 |
 | `pinned` | `boolean` | 被钉住的记忆抵抗自动降温。 |
 | `expires_at` | ISO 日期或 null | 到期后维护任务将其降至 cold。 |
@@ -104,9 +104,9 @@ const packet = memory.buildContinuityPacket("room-1", 280, {
 
 ## FTS5 搜索
 
-安装 `better-sqlite3` 后，全文搜索使用 SQLite FTS5 配合 `unicode61` 分词。中文通过 bigram 处理。
+安装 `better-sqlite3` 后，全文搜索使用 SQLite FTS5 配合 `unicode61` 分词；FTS5 不可用时回退到中文 bigram。时间型追忆还会对 embedding 索引中的原文做词法排序，避免相似概念挤掉真正的最近事件。
 
-召回顺序固定为：**Hot → Warm → Cold**。Archive 在代码层面排除，永不进入结果。
+普通联想的召回顺序为：**Hot → Warm → Cold**。Archive 不参加普通联想；“上次、最后一次、什么时候”等明确追忆可以按需访问 Archive 原文。
 
 索引缺失或损坏时自动在进程内重建（无子进程）。重建失败则透明回退到 bigram 搜索。
 
@@ -141,6 +141,8 @@ node src/lifecycle-maintenance.js
 
 - 将已过 `expires_at` 的记忆降至 cold
 - 将带 `superseded_by` 的记忆降至 cold
+- 默认按未召回时间自动降温：7 天后 warm、30 天后 cold、90 天后 archive（可用 `PRISM_WARM_AFTER_DAYS`、`PRISM_COLD_AFTER_DAYS`、`PRISM_ARCHIVE_AFTER_DAYS` 调整）
+- 成功召回会记录次数和时间，并将对应的非 pinned 派生记忆重新升为 hot
 - 生成维护报告写入 `ledger/lifecycle-maintenance.json`
 
 **不调用模型，不消耗 API token。** 适合配置为每日定时任务。
